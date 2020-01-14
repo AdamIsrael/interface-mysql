@@ -21,14 +21,14 @@ class MySQLServer(Object):
     on = MySQLServerEvents()
     state = StoredState()
 
-    def __init__(self, parent, relation_name):
-        super().__init__(parent, relation_name)
+    def __init__(self, charm, relation_name):
+        super().__init__(charm, relation_name)
         self.relation_name = relation_name
 
         self.state.database = getattr(self.state, 'database', {})
 
-        self.framework.observe(parent.on[relation_name].relation_changed, self.on_changed)
-        self.framework.observe(parent.on[relation_name].relation_broken, self.on_broken)
+        self.framework.observe(charm.on[relation_name].relation_changed, self.on_changed)
+        self.framework.observe(charm.on[relation_name].relation_broken, self.on_broken)
 
     def on_changed(self, event):
         try:
