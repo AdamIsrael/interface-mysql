@@ -1,7 +1,5 @@
-from collections import namedtuple
-
 from ops.framework import EventBase, EventsBase, EventSource, Object, StoredState
-from ops.model import BlockedStatus, StatusBase, WaitingStatus
+from ops.model import IncompleteRelationError, ModelError, NoRelatedAppsError, TooManyRelatedAppsError
 
 
 class DatabaseEvent(EventBase):
@@ -24,63 +22,57 @@ class DatabaseChangedEvent(DatabaseEvent):
     pass
 
 
-class DatabaseUnavailableEvent(EventBase):
-    def __init__(self, handle, status):
+class DatabaseLostEvent(EventBase):
+    def __init__(self, handle, relation_name):
         super().__init__(handle)
-        self.status = status
+        self.relation_name = relation_name
+        self.status = NoRelatedAppsError(relation_name).status
 
     def snapshot(self):
-        return {
-            'name': self.status.name,
-            'message': self.status.message,
-        }
+        return self.relation_name
 
-    def restore(self, snapshot):
-        self.status = StatusBase.from_name(snapshot['name'], snapshot['message'])
+    def restore(self, relation_name):
+        self.relation_name = relation_name
+        self.status = NoRelatedAppsError(relation_name).status
 
 
-class MySQLServerEvents(EventsBase):
+class MySQLClientEvents(EventsBase):
     database_available = EventSource(DatabaseAvailableEvent)
     database_changed = EventSource(DatabaseChangedEvent)
-    database_unavailable = EventSource(DatabaseUnavailableEvent)
+    database_lost = EventSource(DatabaseLostEvent)
 
 
-class MySQLServer(Object):
-    on = MySQLServerEvents()
+class MySQLClient(Object):
+    on = MySQLClientEvents()
     state = StoredState()
 
     def __init__(self, charm, relation_name):
         super().__init__(charm, relation_name)
+        self.state.set_default(db_hash=None)
         self.relation_name = relation_name
 
-        self.framework.observe(charm.on.start, self.init_state)
         self.framework.observe(charm.on[relation_name].relation_changed, self.on_changed)
         self.framework.observe(charm.on[relation_name].relation_broken, self.on_broken)
-
-    def init_state(self, event):
-        self.state.database = {}
-        # Force checking for the database, even though it's almost certainly not there yet,
-        # just so we can at least inform the charm of that fact.
-        self.on_changed(event)
 
     def on_changed(self, event):
         try:
             db = self.database()
-        except MySQLServerError as e:
-            self.state.database = {}
-            self.on.database_unavailable.emit(e.status)
+        except ModelError as e:
+            had_db = self.state.db_hash is not None
+            self.state.db_hash = None
+            if had_db:
+                self.on.database_lost.emit(e.status)
         else:
-            prev_db = self.state.database
-            # Subclasses of dict can't be marshalled so can't be stored directly.
-            self.state.database = dict(db)
-            if not prev_db:
+            old_hash = self.state.db_hash
+            new_hash = self.state.db_hash = hash(frozenset(db.items()))
+            if old_hash is None:
                 self.on.database_available.emit(db)
-            elif db != prev_db:
+            elif new_hash != old_hash:
                 self.on.database_changed.emit(db)
 
     def on_broken(self, event):
-        self.state.database = {}
-        self.on.database_unavailable.emit(BlockedStatus(f'Missing relation: {self.relation_name}'))
+        self.state.db_hash = None
+        self.on.database_lost.emit()
 
     @property
     def _relations(self):
@@ -88,16 +80,15 @@ class MySQLServer(Object):
 
     def database(self):
         if not self._relations:
-            raise MissingRelationError(self.relation_name)
+            raise NoRelatedAppsError(self.relation_name)
         if len(self._relations) > 1:
-            raise TooManyDatabasesError(self.relation_name, len(self._relations))
+            raise TooManyRelatedAppsError(self.relation_name, len(self._relations), 1)
         db = MySQLDatabase.from_relation(self._relations[0])
         if db is None:
-            raise IncompleteDatabaseError(self.relation_name)
+            raise IncompleteRelationError(self.relation_name)
         return db
 
 
-# TODO: Maybe if this is an Object, it could be stored directly?
 class MySQLDatabase(dict):
     @classmethod
     def from_relation(cls, relation):
@@ -134,26 +125,3 @@ class MySQLDatabase(dict):
     @property
     def password(self):
         return self['password']
-
-
-class MySQLServerError(Exception):
-    # Status will be set by subclass.
-    status = None
-
-
-class MissingRelationError(MySQLServerError):
-    def __init__(self, relation_name):
-        super().__init__(relation_name)
-        self.status = BlockedStatus(f'Missing relation: {relation_name}')
-
-
-class TooManyDatabasesError(MySQLServerError):
-    def __init__(self, relation_name, num_apps):
-        super().__init__(relation_name)
-        self.status = BlockedStatus(f'Too many related applications: {relation_name}')
-
-
-class IncompleteDatabaseError(MySQLServerError):
-    def __init__(self, relation_name):
-        super().__init__(relation_name)
-        self.status = WaitingStatus(f'Waiting for database: {relation_name}')
