@@ -1,5 +1,27 @@
 from ops.framework import EventBase, EventsBase, EventSource, Object, StoredState
-from ops.model import IncompleteRelationError, ModelError, NoRelatedAppsError, TooManyRelatedAppsError
+from ops.model import BlockedStatus, ModelError, WaitingStatus
+
+
+class DatabaseError(ModelError):
+    status_type = BlockedStatus
+    status_message = 'Database error'
+
+    def __init__(self, relation_name):
+        super().__init__(relation_name)
+        self.status = self.status_type(f'{self.status_message}: {relation_name}')
+
+
+class IncompleteRelationError(DatabaseError):
+    status_type = WaitingStatus
+    status_message = 'Waiting for relation'
+
+
+class NoRelatedAppsError(DatabaseError):
+    status_message = 'Missing relation'
+
+
+class TooManyRelatedAppsError(DatabaseError):
+    status_message = 'Too many related applications'
 
 
 class DatabaseEvent(EventBase):
@@ -82,7 +104,7 @@ class MySQLClient(Object):
         if not self._relations:
             raise NoRelatedAppsError(self.relation_name)
         if len(self._relations) > 1:
-            raise TooManyRelatedAppsError(self.relation_name, len(self._relations), 1)
+            raise TooManyRelatedAppsError(self.relation_name)
         db = MySQLDatabase.from_relation(self._relations[0])
         if db is None:
             raise IncompleteRelationError(self.relation_name)
