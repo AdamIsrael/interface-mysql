@@ -72,7 +72,7 @@ class MySQLClient(Object):
 
     def on_broken(self, event):
         self.state.db_hash = None
-        self.on.database_lost.emit()
+        self.on.database_lost.emit(event.relation.name)
 
     @property
     def _relations(self):
